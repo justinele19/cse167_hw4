@@ -86,4 +86,103 @@ void detect_collision(uint tid : SV_DispatchThreadID,
         return;
     }
     // TODO: HW 4.6. Your code below.
+    float3 x = positions[tid];
+
+    // closest collider so far (smallest signed distance)
+    float best_dist = 1e30;
+    float4 best_plane = float4(0.0);
+
+    // --- planes and spheres (same as 4.5) ---
+    for (uint i = 0; i < num_planes; i++) {
+        float4 p = planes[i];
+        float dist = dot(p.xyz, x) - p.w;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_plane = p;
+        }
+    }
+
+    for (uint i = 0; i < num_spheres; i++) {
+        float4 s = spheres[i];
+        float3 v = x - s.xyz;
+        float len = length(v);
+        float3 n = (len > 1e-8) ? v / len : float3(0.0, 1.0, 0.0);
+        float dist = len - s.w;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_plane = float4(n, dot(n, s.xyz) + s.w);
+        }
+    }
+
+    // --- mesh: find the closest triangle using the BVH ---
+    // only care about triangles closer than the contact range
+    float closest_dist = contact_margin + collision_distance;
+    bool found = false;
+    uint3 hit_tri = uint3(0);
+    float3 hit_bary = float3(0.0);
+
+    // stackless traversal: first child is node + 1,
+    // next_index skips the whole subtree
+    uint node = 0;
+    while (node < num_bvh_nodes) {
+        BVHNode N = bvh_nodes[node];
+
+        // box is farther than our best triangle, skip it
+        if (point_aabb_distance(x, N.bbox_min, N.bbox_max) > closest_dist) {
+            node = uint(N.next_index);
+            continue;
+        }
+
+        if (N.is_leaf) {
+            for (uint t = N.triangle_begin; t < N.triangle_end; t++) {
+                uint3 tri = mesh_triangles[t];
+                ClosestPoint cp = closest_point_triangle(
+                    x, mesh_vertices[tri.x], mesh_vertices[tri.y], mesh_vertices[tri.z]);
+                float d = length(x - cp.position);
+                if (d < closest_dist) {
+                    closest_dist = d;
+                    hit_tri = tri;
+                    hit_bary = cp.bary;
+                    found = true;
+                }
+            }
+            node = uint(N.next_index);
+        } else {
+            node = node + 1;
+        }
+    }
+
+    // treat the closest triangle as an infinite plane
+    if (found) {
+        float3 p0 = mesh_vertices[hit_tri.x];
+        float3 p1 = mesh_vertices[hit_tri.y];
+        float3 p2 = mesh_vertices[hit_tri.z];
+        float3 n0 = mesh_vertex_normals[hit_tri.x];
+        float3 n1 = mesh_vertex_normals[hit_tri.y];
+        float3 n2 = mesh_vertex_normals[hit_tri.z];
+
+        // face normal
+        float3 ng = normalize(cross(p1 - p0, p2 - p0));
+        // interpolated vertex normal at the closest point
+        float3 ns = normalize(hit_bary.x * n0 + hit_bary.y * n1 + hit_bary.z * n2);
+        // flip face normal so it points outside
+        if (dot(ng, ns) < 0.0) {
+            ng = -ng;
+        }
+
+        float d = dot(ng, p0);
+        float dist = dot(ng, x) - d;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_plane = float4(ng, d);
+        }
+    }
+
+    // --- store the contact (same as 4.5) ---
+    if (best_dist < contact_margin + collision_distance) {
+        best_plane.w += collision_distance;
+        contact_planes[tid] = best_plane;
+    } else {
+        contact_planes[tid] = float4(0.0);
+    }
 }
